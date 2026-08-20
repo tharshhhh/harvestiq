@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+venv/
+env/
+.venv/
+*.egg-info/
+.Python
+
+# Node
+node_modules/
+dist/
+dist-ssr/
+*.local
+.vite/
+
+# Large model files (see README for how to generate)
+*.keras
+*.h5
+disease_model*
+
+# Environment / secrets
+.env
+.env.local
+*.key
+config.local.js
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Logs
+*.log
+npm-debug.log*
+yarn-error.log*
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data (uncomment if datasets get large)
+# ml/data/*.csv

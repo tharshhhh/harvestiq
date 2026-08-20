@@ -1,0 +1,22 @@
+{
+  "Random Forest": {
+    "test_accuracy": 0.9955,
+    "cv_mean": 0.9945
+  },
+  "Decision Tree": {
+    "test_accuracy": 0.9795,
+    "cv_mean": 0.9868
+  },
+  "KNN": {
+    "test_accuracy": 0.9773,
+    "cv_mean": 0.9795
+  },
+  "SVM (RBF)": {
+    "test_accuracy": 0.9841,
+    "cv_mean": 0.9782
+  },
+  "Logistic Regression": {
+    "test_accuracy": 0.95,
+    "cv_mean": 0.9686
+  }
+}

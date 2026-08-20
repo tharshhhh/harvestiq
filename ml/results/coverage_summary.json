@@ -1,0 +1,18 @@
+{
+  "model_1_crop_count": 22,
+  "model_2_crop_count": 17,
+  "new_crops_added": [
+    "barley",
+    "ground nuts",
+    "millets",
+    "oil seeds",
+    "paddy",
+    "pulses",
+    "sugarcane",
+    "tobacco",
+    "wheat"
+  ],
+  "total_unique_crop_coverage": 31,
+  "model_2_test_accuracy": 1.0,
+  "model_2_cv_mean": 1.0
+}
