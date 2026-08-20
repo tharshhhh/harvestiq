@@ -103,7 +103,7 @@ const FIELD_CONTEXT = `Field data: soil health 78/100, pH 6.8, Nitrogen 240 kg/h
 const GEMINI_API_KEY = "";
 
 // Change this to your deployed backend URL when hosting (e.g. https://your-api.onrender.com)
-const API_BASE = "http://127.0.0.1:8000";
+const API_BASE = "https://harvestiq-2f3u.onrender.com";
 
 async function chatReply(msg) {
   if (!GEMINI_API_KEY) return localReply(msg);
