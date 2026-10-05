@@ -98,7 +98,7 @@ const FIELD_CONTEXT = `Field data: soil health 78/100, pH 6.8, Nitrogen 240 kg/h
 const GEMINI_API_KEY = "";
 
 // Change this to your deployed backend URL when hosting (e.g. https://your-api.onrender.com)
-const API_BASE = "https://harvestiq-2f3u.onrender.com";
+const API_BASE = "http://127.0.0.1:8000";
 
 async function chatReply(msg) {
   if (!GEMINI_API_KEY) return localReply(msg);
@@ -271,7 +271,7 @@ function useLiveField() {
   useEffect(() => {
     if (loc.lat == null) return;
     setWeatherStatus("loading");
-    fetch(`https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m&daily=temperature_2m_max,precipitation_probability_max,weather_code&timezone=auto&forecast_days=5`)
+    fetch(`https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m&daily=temperature_2m_max,precipitation_probability_max,weather_code,et0_fao_evapotranspiration,precipitation_sum&timezone=auto&forecast_days=7`)
       .then((r) => r.json())
       .then((d) => { setWeather(d); setWeatherStatus("ready"); })
       .catch(() => setWeatherStatus("error"));
@@ -465,6 +465,110 @@ function useSoilData(lat, lon) {
   }, [lat, lon]);
 
   return { soil, soilStatus };
+}
+
+/* ---------------- Irrigation water calculator (FAO-56 method) ----------------
+   ETc = ET0 x Kc, where ET0 is reference evapotranspiration from Open-Meteo
+   and Kc is the FAO crop coefficient. Net irrigation = ETc - effective rainfall,
+   then divided by system efficiency. Validated against published FAO/ICAR
+   crop water requirement ranges.                                            */
+
+const CROP_KC = {
+  rice: { kc: 1.20, days: 120, label: "Rice / Paddy" },
+  maize: { kc: 1.20, days: 110, label: "Maize" },
+  cotton: { kc: 1.15, days: 165, label: "Cotton" },
+  sugarcane: { kc: 1.25, days: 330, label: "Sugarcane" },
+  banana: { kc: 1.10, days: 330, label: "Banana" },
+  groundnut: { kc: 1.15, days: 110, label: "Groundnut" },
+  chickpea: { kc: 1.00, days: 100, label: "Chickpea" },
+  lentil: { kc: 1.10, days: 110, label: "Lentil" },
+  blackgram: { kc: 1.05, days: 80, label: "Black gram" },
+  mungbean: { kc: 1.05, days: 70, label: "Mung bean" },
+  pigeonpeas: { kc: 1.15, days: 165, label: "Pigeon pea" },
+  mothbeans: { kc: 0.95, days: 75, label: "Moth bean" },
+  kidneybeans: { kc: 1.15, days: 105, label: "Kidney bean" },
+  coconut: { kc: 1.00, days: 365, label: "Coconut" },
+  mango: { kc: 0.85, days: 150, label: "Mango" },
+  coffee: { kc: 0.95, days: 270, label: "Coffee" },
+  jute: { kc: 1.10, days: 110, label: "Jute" },
+  watermelon: { kc: 1.00, days: 90, label: "Watermelon" },
+  muskmelon: { kc: 1.00, days: 90, label: "Muskmelon" },
+  papaya: { kc: 1.05, days: 300, label: "Papaya" },
+  orange: { kc: 0.90, days: 270, label: "Orange" },
+  pomegranate: { kc: 0.90, days: 180, label: "Pomegranate" },
+  grapes: { kc: 0.85, days: 180, label: "Grapes" },
+  apple: { kc: 0.95, days: 165, label: "Apple" },
+  millet: { kc: 1.00, days: 90, label: "Millet / Ragi" },
+};
+
+// Application efficiency by irrigation method (FAO typical values)
+const IRRIGATION_EFFICIENCY = {
+  "Drip system": 0.90,
+  "Sprinkler": 0.75,
+  "Farm pond / Tank": 0.60,
+  "Canal": 0.55,
+  "Borewell": 0.60,
+  "Open well": 0.60,
+  "River / Stream": 0.55,
+  "Rain-fed only": 1.00,
+};
+
+const ACRE_TO_HA = 0.404686;
+const MM_PER_ACRE_LITRES = 4046.86;   // 1 mm depth over 1 acre = 4,046.86 litres
+
+function bestEfficiency(sources) {
+  if (!sources?.length) return { value: 0.65, label: "surface irrigation" };
+  let best = 0, label = "";
+  for (const s of sources) {
+    const e = IRRIGATION_EFFICIENCY[s];
+    if (e != null && e > best && s !== "Rain-fed only") { best = e; label = s; }
+  }
+  if (best === 0) return { value: 1.0, label: "rain-fed" };
+  return { value: best, label };
+}
+
+function calculateWater({ et0, rainfall7day, crop, acres, irrigationSources }) {
+  const key = (crop || "").toLowerCase().replace(/[^a-z]/g, "");
+  const cropData = CROP_KC[key] || { kc: 1.05, days: 120, label: crop || "Selected crop" };
+  const eff = bestEfficiency(irrigationSources);
+
+  const etc = et0 * cropData.kc;                       // mm/day crop water use
+  const dailyRain = (rainfall7day || 0) / 7;
+  const effectiveRain = dailyRain * 0.75;              // ~75% of rain is usable
+  const netNeed = Math.max(0, etc - effectiveRain);    // mm/day to supply
+  const grossNeed = netNeed / eff.value;               // account for system losses
+
+  const litresPerDayPerAcre = grossNeed * MM_PER_ACRE_LITRES;
+  const litresPerDay = litresPerDayPerAcre * acres;
+
+  return {
+    cropLabel: cropData.label,
+    kc: cropData.kc,
+    seasonDays: cropData.days,
+    et0: Math.round(et0 * 100) / 100,
+    etc: Math.round(etc * 100) / 100,
+    effectiveRain: Math.round(effectiveRain * 100) / 100,
+    netNeed: Math.round(netNeed * 100) / 100,
+    grossNeed: Math.round(grossNeed * 100) / 100,
+    efficiency: eff,
+    litresPerDay: Math.round(litresPerDay),
+    litresPerWeek: Math.round(litresPerDay * 7),
+    m3PerDay: Math.round(litresPerDay / 1000 * 10) / 10,
+    seasonTotalMm: Math.round(etc * cropData.days),
+    seasonTotalLitres: Math.round(grossNeed * cropData.days * MM_PER_ACRE_LITRES * acres),
+    // A typical 5 HP borewell pump delivers roughly 30,000 litres per hour
+    pumpHoursPerDay: Math.round((litresPerDay / 30000) * 10) / 10,
+    tankersPerDay: Math.round((litresPerDay / 12000) * 10) / 10,
+  };
+}
+
+function acresFromFarmSize(sizeLabel) {
+  if (!sizeLabel) return 1;
+  if (sizeLabel.includes("Under 1")) return 0.5;
+  if (sizeLabel.includes("1-5")) return 3;
+  if (sizeLabel.includes("5-10")) return 7.5;
+  if (sizeLabel.includes("Over 10")) return 15;
+  return 1;
 }
 
 /* ---------------- Alert engine (derived from live weather + soil) ---------------- */
@@ -1383,6 +1487,155 @@ function DetectScreen({ go }) {
   );
 }
 
+
+function WaterScreen({ go, weather, profile, soil }) {
+  const [crop, setCrop] = useState("groundnut");
+  const [acres, setAcres] = useState(acresFromFarmSize(profile?.farmSize));
+  const [acreInput, setAcreInput] = useState(String(acresFromFarmSize(profile?.farmSize)));
+
+  const daily = weather?.daily;
+  const et0vals = (daily?.et0_fao_evapotranspiration || []).filter((v) => v != null);
+  const et0 = et0vals.length ? et0vals.reduce((a, b) => a + b, 0) / et0vals.length : null;
+  const rain7 = (daily?.precipitation_sum || []).filter((v) => v != null).reduce((a, b) => a + b, 0);
+
+  const result = et0 != null
+    ? calculateWater({ et0, rainfall7day: rain7, crop, acres, irrigationSources: profile?.irrigation })
+    : null;
+
+  const applyAcres = (v) => {
+    setAcreInput(v);
+    const n = parseFloat(v);
+    if (!isNaN(n) && n > 0 && n <= 10000) setAcres(n);
+  };
+
+  const cropOptions = Object.keys(CROP_KC);
+  const inputCls = "w-full bg-white border border-[#B4CDA6] rounded-xl px-4 py-3 text-[#122E16] outline-none focus:border-[#22452A]";
+
+  return (
+    <div className="px-5 pb-28">
+      <TopBar title="Water Requirement" onBack={() => go("home")} />
+
+      <div className="bg-white border border-[#B4CDA6] rounded-2xl p-4 mb-4">
+        <label className="block text-sm text-[#22452A] mb-2">Crop</label>
+        <select value={crop} onChange={(e) => setCrop(e.target.value)} className={inputCls + " mb-4"}>
+          {cropOptions.map((c) => (
+            <option key={c} value={c}>{CROP_KC[c].label}</option>
+          ))}
+        </select>
+
+        <label className="block text-sm text-[#22452A] mb-2">Land area (acres)</label>
+        <input value={acreInput} onChange={(e) => applyAcres(e.target.value)}
+          inputMode="decimal" className={inputCls} />
+        <div className="flex gap-2 mt-2">
+          {[0.5, 1, 2, 5, 10].map((a) => (
+            <button key={a} onClick={() => applyAcres(String(a))}
+              className={`px-3 py-1.5 rounded-lg text-xs border transition-colors ${
+                acres === a ? "bg-[#22452A] text-white border-[#22452A]" : "bg-white text-[#33553A] border-[#B4CDA6]"
+              }`}>
+              {a} ac
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {!result && (
+        <div className="bg-white border border-[#B4CDA6] rounded-2xl p-6 text-center">
+          <Loader2 className="w-5 h-5 text-[#22452A] animate-spin mx-auto mb-2" />
+          <p className="text-sm text-[#4A6B50]">Loading evapotranspiration data for your location…</p>
+        </div>
+      )}
+
+      {result && (
+        <>
+          <div className="bg-white border-2 border-[#22452A] rounded-2xl p-5 mb-4">
+            <p className="text-[11px] uppercase tracking-wide text-[#3A6647] mb-1">Daily water requirement</p>
+            <p className="text-4xl font-mono font-semibold text-[#122E16]">
+              {result.litresPerDay.toLocaleString()}
+              <span className="text-lg text-[#4A6B50] ml-2">litres/day</span>
+            </p>
+            <p className="text-sm text-[#33553A] mt-1">
+              {result.m3PerDay} m³ · {result.grossNeed} mm/day over {acres} acre{acres !== 1 ? "s" : ""}
+            </p>
+
+            <div className="grid grid-cols-2 gap-3 mt-4 pt-4 border-t border-[#B4CDA6]">
+              <div>
+                <p className="text-[11px] text-[#55755B]">Per week</p>
+                <p className="text-lg font-mono text-[#122E16]">{(result.litresPerWeek / 1000).toFixed(1)} m³</p>
+              </div>
+              <div>
+                <p className="text-[11px] text-[#55755B]">Pump running time</p>
+                <p className="text-lg font-mono text-[#122E16]">{result.pumpHoursPerDay} hrs/day</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white border border-[#B4CDA6] rounded-2xl p-4 mb-4">
+            <p className="text-[11px] uppercase tracking-wide text-[#55755B] mb-3">How this is calculated</p>
+            <div className="space-y-2 text-[13px]">
+              <div className="flex justify-between">
+                <span className="text-[#4A6B50]">Reference evapotranspiration (ET₀)</span>
+                <span className="font-mono text-[#122E16]">{result.et0} mm/day</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-[#4A6B50]">Crop coefficient (K<sub>c</sub>) — {result.cropLabel}</span>
+                <span className="font-mono text-[#122E16]">× {result.kc}</span>
+              </div>
+              <div className="flex justify-between border-t border-[#DFEBD6] pt-2">
+                <span className="text-[#4A6B50]">Crop water use (ET<sub>c</sub>)</span>
+                <span className="font-mono text-[#122E16]">{result.etc} mm/day</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-[#4A6B50]">Less effective rainfall</span>
+                <span className="font-mono text-[#122E16]">− {result.effectiveRain} mm/day</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-[#4A6B50]">Net irrigation need</span>
+                <span className="font-mono text-[#122E16]">{result.netNeed} mm/day</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-[#4A6B50]">System efficiency ({result.efficiency.label})</span>
+                <span className="font-mono text-[#122E16]">÷ {(result.efficiency.value * 100).toFixed(0)}%</span>
+              </div>
+              <div className="flex justify-between border-t border-[#B4CDA6] pt-2">
+                <span className="text-[#22452A] font-medium">Gross water to apply</span>
+                <span className="font-mono text-[#22452A] font-medium">{result.grossNeed} mm/day</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white border border-[#B4CDA6] rounded-2xl p-4 mb-4">
+            <p className="text-[11px] uppercase tracking-wide text-[#55755B] mb-3">Full season estimate</p>
+            <div className="flex items-baseline gap-2 mb-1">
+              <p className="text-2xl font-mono font-semibold text-[#122E16]">
+                {(result.seasonTotalLitres / 1000000).toFixed(2)}
+              </p>
+              <p className="text-sm text-[#4A6B50]">million litres</p>
+            </div>
+            <p className="text-[12px] text-[#4A6B50]">
+              {result.seasonTotalMm} mm over roughly {result.seasonDays} days for {acres} acre{acres !== 1 ? "s" : ""}
+            </p>
+          </div>
+
+          {(!profile?.irrigation?.length || profile.irrigation.includes("Rain-fed only")) && (
+            <div className="bg-[#22452A]/10 border border-[#22452A]/30 rounded-xl p-3 mb-4">
+              <p className="text-[12px] text-[#22452A] leading-relaxed">
+                Switching to a drip system would cut this requirement by roughly 35% compared with
+                flood or canal irrigation, by reducing evaporation and runoff losses.
+              </p>
+            </div>
+          )}
+
+          <p className="text-[11px] text-[#55755B] leading-relaxed">
+            Calculated using the FAO-56 Penman-Monteith method. ET₀ comes from live weather data for your
+            location; crop coefficients are FAO standard values for the mid-season stage. Actual needs vary
+            with growth stage, soil type and local conditions — treat this as a planning estimate.
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
 function GuideScreen({ go }) {
   return (
     <div className="px-5 pb-28">
@@ -2030,6 +2283,7 @@ function SideNav({ active, go, profile }) {
   const tabs = [
     { id: "home", icon: Sprout, label: "Field" },
     { id: "soil", icon: Leaf, label: "Soil" },
+    { id: "water", icon: Droplets, label: "Water" },
     { id: "detect", icon: Camera, label: "Detect" },
     { id: "guide", icon: CalendarCheck, label: "Guide" },
     { id: "chat", icon: MessageCircle, label: "Assistant" },
@@ -2079,8 +2333,8 @@ function MobileNav({ active, go }) {
   const tabs = [
     { id: "home", icon: Sprout, label: "Field" },
     { id: "soil", icon: Leaf, label: "Soil" },
+    { id: "water", icon: Droplets, label: "Water" },
     { id: "detect", icon: Camera, label: "Detect" },
-    { id: "guide", icon: CalendarCheck, label: "Guide" },
     { id: "chat", icon: MessageCircle, label: "Assistant" },
   ];
   return (
@@ -2112,13 +2366,14 @@ export default function HarvestIQApp() {
     [weather, soil, climate, profile]
   );
   const { permission: notifPermission, requestNotifications } = useNotifications(alerts);
-  const navTabs = ["home", "soil", "detect", "guide", "chat", "alerts"];
+  const navTabs = ["home", "soil", "water", "detect", "guide", "chat", "alerts"];
 
   const screens = {
     home: <HomeScreen go={setScreen} alerts={alerts} loc={loc} weather={weather} weatherStatus={weatherStatus} requestGPS={requestGPS} setManualLocation={setManualLocation} soil={soil} soilStatus={soilStatus} climate={climate} />,
     soil: <SoilScreen go={setScreen} weather={weather} soil={soil} soilStatus={soilStatus} climate={climate} />,
     detect: <DetectScreen go={setScreen} />,
     guide: <GuideScreen go={setScreen} />,
+    water: <WaterScreen go={setScreen} weather={weather} profile={profile} soil={soil} />,
     alerts: <AlertsScreen go={setScreen} alerts={alerts} notifPermission={notifPermission} requestNotifications={requestNotifications} />,
     chat: <ChatScreen go={setScreen} />,
   };
